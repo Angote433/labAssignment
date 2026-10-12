@@ -22,9 +22,18 @@ OBJC="objc"
 # How much of a file is read at a time. Whole files are never held in memory.
 CHUNK = 4096
 
-# One global lock protects every operation (open, read, write, close), so two
-# threads can never race while B is being validated or A is being replaced.
+# One global lock protects every operation (open, read, write, close) and the
+# two tables below, so two threads can never race while B is being validated
+# or A is being replaced.
 mycontext['ab_lock'] = createlock()
+
+# One lock per file name: a thread holds it from ABopenfile until close(), so
+# only one thread can use a given file at a time. Other threads wait their turn.
+mycontext['file_locks'] = {}
+
+# Which thread currently has each file open (used to avoid self-deadlock if the
+# same thread tries to open a file it already has open).
+mycontext['file_owners'] = {}
 
 
 def ab_scan(f):
@@ -46,6 +55,7 @@ def ab_scan(f):
 
 def ab_copy(src, dst):
   # Copy src into dst in chunks, back to back so there are no gaps.
+  # Returns the number of bytes copied.
   offset = 0
   while True:
     chunk = src.readat(CHUNK, offset)
@@ -57,7 +67,9 @@ def ab_copy(src, dst):
 
 
 class ABFile():
-  def __init__(self, filename, create):
+  def __init__(self, filename, create, flock):
+    self.filename = filename
+    self.flock = flock
     self.Afn = filename + '.a'
     self.Bfn = filename + '.b'
     self.closed = False
@@ -148,14 +160,43 @@ class ABFile():
         self.Bfile.close()
       except Exception:
         pass
+
+      # This thread is done with the file: let the next waiting thread in.
+      if self.filename in mycontext['file_owners']:
+        del mycontext['file_owners'][self.filename]
+      self.flock.release()
     finally:
       mycontext['ab_lock'].release()
 
 
 def ABopenfile(filename, create):
+  me = getthreadname()
+
   mycontext['ab_lock'].acquire(True)
   try:
-    return ABFile(filename, create)
+    if (filename in mycontext['file_owners']) and (mycontext['file_owners'][filename] == me):
+      # This same thread already has the file open: waiting would deadlock,
+      # so fail the way RepyV2 normally does for an already-open file.
+      raise FileInUseError("File is already open")
+    if filename not in mycontext['file_locks']:
+      mycontext['file_locks'][filename] = createlock()
+    flock = mycontext['file_locks'][filename]
+  finally:
+    mycontext['ab_lock'].release()
+
+  # Wait here (without holding the global lock) until no other thread is
+  # using this file.
+  flock.acquire(True)
+
+  mycontext['ab_lock'].acquire(True)
+  try:
+    try:
+      newfile = ABFile(filename, create, flock)
+    except Exception:
+      flock.release()
+      raise
+    mycontext['file_owners'][filename] = me
+    return newfile
   finally:
     mycontext['ab_lock'].release()
 
