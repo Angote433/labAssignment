@@ -53,6 +53,7 @@ def ab_copy(src, dst):
       break
     dst.writeat(chunk, offset)
     offset = offset + len(chunk)
+  return offset
 
 
 class ABFile():
@@ -62,6 +63,8 @@ class ABFile():
     self.closed = False
     self.Afile = None
     self.Bfile = None
+    # Current length of the scratch file B (writes may not go past this).
+    self.Bsize = 0
 
     if create and (self.Afn not in listfiles()):
       # Brand new file: the valid backup starts as 'SE'.
@@ -82,7 +85,7 @@ class ABFile():
       if self.Bfn in listfiles():
         removefile(self.Bfn)
       self.Bfile = openfile(self.Bfn, True)
-      ab_copy(self.Afile, self.Bfile)
+      self.Bsize = ab_copy(self.Afile, self.Bfile)
     except Exception:
       self.Afile.close()
       raise
@@ -93,8 +96,15 @@ class ABFile():
       return
     mycontext['ab_lock'].acquire(True)
     try:
+      # A write that would start past the end of the file (leaving a gap),
+      # or at a negative offset, is invalid: drop it silently.
+      if offset < 0 or offset > self.Bsize:
+        return
       # Writes only ever touch the scratch file.
       self.Bfile.writeat(data, offset)
+      end = offset + len(data)
+      if end > self.Bsize:
+        self.Bsize = end
     finally:
       mycontext['ab_lock'].release()
 
