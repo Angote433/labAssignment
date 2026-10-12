@@ -22,8 +22,8 @@ OBJC="objc"
 # How much of a file is read at a time. Whole files are never held in memory.
 CHUNK = 4096
 
-# One global lock protects creating files and committing B over A, so two
-# threads can never race while A is being replaced.
+# One global lock protects every operation (open, read, write, close), so two
+# threads can never race while B is being validated or A is being replaced.
 mycontext['ab_lock'] = createlock()
 
 
@@ -59,22 +59,15 @@ class ABFile():
   def __init__(self, filename, create):
     self.Afn = filename + '.a'
     self.Bfn = filename + '.b'
-    self.lock = createlock()
     self.closed = False
     self.Afile = None
     self.Bfile = None
 
-    files = listfiles()
-
-    if create and (self.Afn not in files):
-      # Brand new file: drop any stale scratch file, make the valid backup
-      # 'SE', and start with an empty scratch file.
-      if self.Bfn in files:
-        removefile(self.Bfn)
+    if create and (self.Afn not in listfiles()):
+      # Brand new file: the valid backup starts as 'SE'.
       self.Afile = openfile(self.Afn, True)
       try:
         self.Afile.writeat('SE', 0)
-        self.Bfile = openfile(self.Bfn, True)
       except Exception:
         self.Afile.close()
         raise
@@ -82,35 +75,41 @@ class ABFile():
       # The file already exists (or must exist). Never recreate or reset it.
       # If it does not exist, the underlying call raises the normal error.
       self.Afile = openfile(self.Afn, False)
-      try:
-        self.Bfile = openfile(self.Bfn, True)
-      except Exception:
-        self.Afile.close()
-        raise
+
+    try:
+      # B always starts fresh, as a copy of A, so no stale data is left over
+      # and offsets match what the application sees when it reads A.
+      if self.Bfn in listfiles():
+        removefile(self.Bfn)
+      self.Bfile = openfile(self.Bfn, True)
+      ab_copy(self.Afile, self.Bfile)
+    except Exception:
+      self.Afile.close()
+      raise
 
   def writeat(self, data, offset):
     # Data that begins with a space is dropped silently.
     if data[0:1] == ' ':
       return
-    self.lock.acquire(True)
+    mycontext['ab_lock'].acquire(True)
     try:
       # Writes only ever touch the scratch file.
       self.Bfile.writeat(data, offset)
     finally:
-      self.lock.release()
+      mycontext['ab_lock'].release()
 
   def readat(self, bytes, offset):
-    self.lock.acquire(True)
+    mycontext['ab_lock'].acquire(True)
     try:
       # Reads only ever come from the valid backup.
       return self.Afile.readat(bytes, offset)
     finally:
-      self.lock.release()
+      mycontext['ab_lock'].release()
 
   def close(self):
     # close() is declared as "raises nothing" below, so it must never raise:
     # an exception here would be a fatal error for the whole program.
-    self.lock.acquire(True)
+    mycontext['ab_lock'].acquire(True)
     try:
       if self.closed:
         # Closing twice does nothing.
@@ -122,15 +121,10 @@ class ABFile():
 
         if first == 'S' and last == 'E':
           # B is valid: replace A with the contents of B.
-          mycontext['ab_lock'].acquire(True)
-          try:
-            self.Afile.close()
-            removefile(self.Afn)
-            newA = openfile(self.Afn, True)
-            self.Afile = newA
-            ab_copy(self.Bfile, newA)
-          finally:
-            mycontext['ab_lock'].release()
+          self.Afile.close()
+          removefile(self.Afn)
+          self.Afile = openfile(self.Afn, True)
+          ab_copy(self.Bfile, self.Afile)
         # If B is not valid, A is left exactly as it is.
       except Exception:
         pass
@@ -145,7 +139,7 @@ class ABFile():
       except Exception:
         pass
     finally:
-      self.lock.release()
+      mycontext['ab_lock'].release()
 
 
 def ABopenfile(filename, create):
