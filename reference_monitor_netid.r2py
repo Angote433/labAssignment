@@ -22,9 +22,18 @@ OBJC="objc"
 # How much of a file is read at a time. Whole files are never held in memory.
 CHUNK = 4096
 
-# One global lock protects creating files and committing B over A, so two
-# threads can never race while A is being replaced.
+# One global lock protects every operation (open, read, write, close) and the
+# two tables below, so two threads can never race while B is being validated
+# or A is being replaced.
 mycontext['ab_lock'] = createlock()
+
+# One lock per file name: a thread holds it from ABopenfile until close(), so
+# only one thread can use a given file at a time. Other threads wait their turn.
+mycontext['file_locks'] = {}
+
+# Which thread currently has each file open (used to avoid self-deadlock if the
+# same thread tries to open a file it already has open).
+mycontext['file_owners'] = {}
 
 
 def ab_scan(f):
@@ -46,6 +55,7 @@ def ab_scan(f):
 
 def ab_copy(src, dst):
   # Copy src into dst in chunks, back to back so there are no gaps.
+  # Returns the number of bytes copied.
   offset = 0
   while True:
     chunk = src.readat(CHUNK, offset)
@@ -53,28 +63,26 @@ def ab_copy(src, dst):
       break
     dst.writeat(chunk, offset)
     offset = offset + len(chunk)
+  return offset
 
 
 class ABFile():
-  def __init__(self, filename, create):
+  def __init__(self, filename, create, flock):
+    self.filename = filename
+    self.flock = flock
     self.Afn = filename + '.a'
     self.Bfn = filename + '.b'
-    self.lock = createlock()
     self.closed = False
     self.Afile = None
     self.Bfile = None
+    # Current length of the scratch file B (writes may not go past this).
+    self.Bsize = 0
 
-    files = listfiles()
-
-    if create and (self.Afn not in files):
-      # Brand new file: drop any stale scratch file, make the valid backup
-      # 'SE', and start with an empty scratch file.
-      if self.Bfn in files:
-        removefile(self.Bfn)
+    if create and (self.Afn not in listfiles()):
+      # Brand new file: the valid backup starts as 'SE'.
       self.Afile = openfile(self.Afn, True)
       try:
         self.Afile.writeat('SE', 0)
-        self.Bfile = openfile(self.Bfn, True)
       except Exception:
         self.Afile.close()
         raise
@@ -82,35 +90,48 @@ class ABFile():
       # The file already exists (or must exist). Never recreate or reset it.
       # If it does not exist, the underlying call raises the normal error.
       self.Afile = openfile(self.Afn, False)
-      try:
-        self.Bfile = openfile(self.Bfn, True)
-      except Exception:
-        self.Afile.close()
-        raise
+
+    try:
+      # B always starts fresh, as a copy of A, so no stale data is left over
+      # and offsets match what the application sees when it reads A.
+      if self.Bfn in listfiles():
+        removefile(self.Bfn)
+      self.Bfile = openfile(self.Bfn, True)
+      self.Bsize = ab_copy(self.Afile, self.Bfile)
+    except Exception:
+      self.Afile.close()
+      raise
 
   def writeat(self, data, offset):
     # Data that begins with a space is dropped silently.
     if data[0:1] == ' ':
       return
-    self.lock.acquire(True)
+    mycontext['ab_lock'].acquire(True)
     try:
+      # A write that would start past the end of the file (leaving a gap),
+      # or at a negative offset, is invalid: drop it silently.
+      if offset < 0 or offset > self.Bsize:
+        return
       # Writes only ever touch the scratch file.
       self.Bfile.writeat(data, offset)
+      end = offset + len(data)
+      if end > self.Bsize:
+        self.Bsize = end
     finally:
-      self.lock.release()
+      mycontext['ab_lock'].release()
 
   def readat(self, bytes, offset):
-    self.lock.acquire(True)
+    mycontext['ab_lock'].acquire(True)
     try:
       # Reads only ever come from the valid backup.
       return self.Afile.readat(bytes, offset)
     finally:
-      self.lock.release()
+      mycontext['ab_lock'].release()
 
   def close(self):
     # close() is declared as "raises nothing" below, so it must never raise:
     # an exception here would be a fatal error for the whole program.
-    self.lock.acquire(True)
+    mycontext['ab_lock'].acquire(True)
     try:
       if self.closed:
         # Closing twice does nothing.
@@ -122,15 +143,10 @@ class ABFile():
 
         if first == 'S' and last == 'E':
           # B is valid: replace A with the contents of B.
-          mycontext['ab_lock'].acquire(True)
-          try:
-            self.Afile.close()
-            removefile(self.Afn)
-            newA = openfile(self.Afn, True)
-            self.Afile = newA
-            ab_copy(self.Bfile, newA)
-          finally:
-            mycontext['ab_lock'].release()
+          self.Afile.close()
+          removefile(self.Afn)
+          self.Afile = openfile(self.Afn, True)
+          ab_copy(self.Bfile, self.Afile)
         # If B is not valid, A is left exactly as it is.
       except Exception:
         pass
@@ -144,14 +160,43 @@ class ABFile():
         self.Bfile.close()
       except Exception:
         pass
+
+      # This thread is done with the file: let the next waiting thread in.
+      if self.filename in mycontext['file_owners']:
+        del mycontext['file_owners'][self.filename]
+      self.flock.release()
     finally:
-      self.lock.release()
+      mycontext['ab_lock'].release()
 
 
 def ABopenfile(filename, create):
+  me = getthreadname()
+
   mycontext['ab_lock'].acquire(True)
   try:
-    return ABFile(filename, create)
+    if (filename in mycontext['file_owners']) and (mycontext['file_owners'][filename] == me):
+      # This same thread already has the file open: waiting would deadlock,
+      # so fail the way RepyV2 normally does for an already-open file.
+      raise FileInUseError("File is already open")
+    if filename not in mycontext['file_locks']:
+      mycontext['file_locks'][filename] = createlock()
+    flock = mycontext['file_locks'][filename]
+  finally:
+    mycontext['ab_lock'].release()
+
+  # Wait here (without holding the global lock) until no other thread is
+  # using this file.
+  flock.acquire(True)
+
+  mycontext['ab_lock'].acquire(True)
+  try:
+    try:
+      newfile = ABFile(filename, create, flock)
+    except Exception:
+      flock.release()
+      raise
+    mycontext['file_owners'][filename] = me
+    return newfile
   finally:
     mycontext['ab_lock'].release()
 
