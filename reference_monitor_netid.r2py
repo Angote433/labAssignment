@@ -1,0 +1,171 @@
+"""
+A/B reference monitor for RepyV2.
+
+For every file "name" the monitor keeps two files:
+  name.a : the valid backup. ALL reads are served from here.
+  name.b : the scratch file. ALL writes go here.
+
+On close(), name.b replaces name.a only if name.b is valid, meaning it starts
+with 'S' and ends with 'E'. Otherwise name.a is left untouched.
+
+Run with:
+  python repy.py encasementlib.r2py reference_monitor_netid.r2py <attack>.r2py
+"""
+TYPE="type"
+ARGS="args"
+RETURN="return"
+EXCP="exceptions"
+TARGET="target"
+FUNC="func"
+OBJC="objc"
+
+# How much of a file is read at a time. Whole files are never held in memory.
+CHUNK = 4096
+
+# One global lock protects creating files and committing B over A, so two
+# threads can never race while A is being replaced.
+mycontext['ab_lock'] = createlock()
+
+
+def ab_scan(f):
+  # Walk the file in chunks and return (first character, last character).
+  # An empty file gives ('', '').
+  offset = 0
+  first = ''
+  last = ''
+  while True:
+    chunk = f.readat(CHUNK, offset)
+    if chunk == '':
+      break
+    if offset == 0:
+      first = chunk[0:1]
+    last = chunk[len(chunk) - 1:]
+    offset = offset + len(chunk)
+  return first, last
+
+
+def ab_copy(src, dst):
+  # Copy src into dst in chunks, back to back so there are no gaps.
+  offset = 0
+  while True:
+    chunk = src.readat(CHUNK, offset)
+    if chunk == '':
+      break
+    dst.writeat(chunk, offset)
+    offset = offset + len(chunk)
+
+
+class ABFile():
+  def __init__(self, filename, create):
+    self.Afn = filename + '.a'
+    self.Bfn = filename + '.b'
+    self.lock = createlock()
+    self.closed = False
+    self.Afile = None
+    self.Bfile = None
+
+    files = listfiles()
+
+    if create and (self.Afn not in files):
+      # Brand new file: drop any stale scratch file, make the valid backup
+      # 'SE', and start with an empty scratch file.
+      if self.Bfn in files:
+        removefile(self.Bfn)
+      self.Afile = openfile(self.Afn, True)
+      try:
+        self.Afile.writeat('SE', 0)
+        self.Bfile = openfile(self.Bfn, True)
+      except Exception:
+        self.Afile.close()
+        raise
+    else:
+      # The file already exists (or must exist). Never recreate or reset it.
+      # If it does not exist, the underlying call raises the normal error.
+      self.Afile = openfile(self.Afn, False)
+      try:
+        self.Bfile = openfile(self.Bfn, True)
+      except Exception:
+        self.Afile.close()
+        raise
+
+  def writeat(self, data, offset):
+    # Data that begins with a space is dropped silently.
+    if data[0:1] == ' ':
+      return
+    self.lock.acquire(True)
+    try:
+      # Writes only ever touch the scratch file.
+      self.Bfile.writeat(data, offset)
+    finally:
+      self.lock.release()
+
+  def readat(self, bytes, offset):
+    self.lock.acquire(True)
+    try:
+      # Reads only ever come from the valid backup.
+      return self.Afile.readat(bytes, offset)
+    finally:
+      self.lock.release()
+
+  def close(self):
+    # close() is declared as "raises nothing" below, so it must never raise:
+    # an exception here would be a fatal error for the whole program.
+    self.lock.acquire(True)
+    try:
+      if self.closed:
+        # Closing twice does nothing.
+        return
+      self.closed = True
+
+      try:
+        first, last = ab_scan(self.Bfile)
+
+        if first == 'S' and last == 'E':
+          # B is valid: replace A with the contents of B.
+          mycontext['ab_lock'].acquire(True)
+          try:
+            self.Afile.close()
+            removefile(self.Afn)
+            newA = openfile(self.Afn, True)
+            self.Afile = newA
+            ab_copy(self.Bfile, newA)
+          finally:
+            mycontext['ab_lock'].release()
+        # If B is not valid, A is left exactly as it is.
+      except Exception:
+        pass
+
+      # Always release both file handles, whatever happened above.
+      try:
+        self.Afile.close()
+      except Exception:
+        pass
+      try:
+        self.Bfile.close()
+      except Exception:
+        pass
+    finally:
+      self.lock.release()
+
+
+def ABopenfile(filename, create):
+  mycontext['ab_lock'].acquire(True)
+  try:
+    return ABFile(filename, create)
+  finally:
+    mycontext['ab_lock'].release()
+
+
+# The code here sets up type checking and variable hiding for you.  You
+# should not need to change anything below here.
+sec_file_def = {"obj-type":ABFile,
+                "name":"ABFile",
+                "writeat":{"type":"func","args":(str,int),"exceptions":Exception,"return":(int,type(None)),"target":ABFile.writeat},
+                "readat":{"type":"func","args":((int,type(None)),(int)),"exceptions":Exception,"return":str,"target":ABFile.readat},
+                "close":{"type":"func","args":None,"exceptions":None,"return":(bool,type(None)),"target":ABFile.close}
+           }
+
+CHILD_CONTEXT_DEF["ABopenfile"] = {TYPE:OBJC,ARGS:(str,bool),EXCP:Exception,RETURN:sec_file_def,TARGET:ABopenfile}
+
+# Execute the user code
+secure_dispatch_module()
