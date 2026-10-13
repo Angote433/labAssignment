@@ -1,0 +1,32 @@
+def cleanup(n):
+  for s in [".a", ".b"]:
+    if n + s in listfiles():
+      removefile(n + s)
+
+def flag(msg):
+  log("ATTACK SUCCEEDED: " + msg + "\n")
+
+# Two files open at once must not share state.
+cleanup("ac5a")
+cleanup("ac5b")
+try:
+  f1 = ABopenfile("ac5a", True)
+  f2 = ABopenfile("ac5b", True)
+  f1.writeat("SoneE", 0)
+  f2.writeat("xtwox", 0)
+  f2.close()
+  f1.close()
+  g1 = ABopenfile("ac5a", False)
+  g2 = ABopenfile("ac5b", False)
+  a = g1.readat(None, 0)
+  b = g2.readat(None, 0)
+  g1.close()
+  g2.close()
+  if a != "SoneE":
+    flag("first file lost its valid data, got " + repr(a))
+  if b != "SE":
+    flag("second file picked up foreign data, got " + repr(b))
+except Exception:
+  flag("working with two files raised an error")
+cleanup("ac5a")
+cleanup("ac5b")

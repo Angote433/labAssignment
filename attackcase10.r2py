@@ -1,0 +1,26 @@
+def cleanup(n):
+  for s in [".a", ".b"]:
+    if n + s in listfiles():
+      removefile(n + s)
+
+def flag(msg):
+  log("ATTACK SUCCEEDED: " + msg + "\n")
+
+# A failed write past the end must not damage the monitor's state.
+cleanup("ac10")
+try:
+  f = ABopenfile("ac10", True)
+  try:
+    f.writeat("zzzz", 100)
+  except Exception:
+    pass
+  f.writeat("SabE", 0)
+  f.close()
+  g = ABopenfile("ac10", False)
+  got = g.readat(None, 0)
+  g.close()
+  if got != "SabE":
+    flag("after a write past EOF the file is " + repr(got))
+except Exception:
+  flag("normal operations raised an error after a write past EOF")
+cleanup("ac10")

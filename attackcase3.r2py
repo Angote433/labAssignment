@@ -1,0 +1,32 @@
+def cleanup(n):
+  for s in [".a", ".b"]:
+    if n + s in listfiles():
+      removefile(n + s)
+
+def flag(msg):
+  log("ATTACK SUCCEEDED: " + msg + "\n")
+
+# Valid data must be saved exactly, and survive a reopen (create False and True).
+good = ["SabE", "S E", "S" + "x" * 9000 + "E"]
+i = 0
+for data in good:
+  name = "ac3x" + str(i)
+  i = i + 1
+  cleanup(name)
+  try:
+    f = ABopenfile(name, True)
+    f.writeat(data, 0)
+    f.close()
+    g = ABopenfile(name, False)
+    got = g.readat(None, 0)
+    g.close()
+    if got != data:
+      flag("valid data was not saved intact (length " + str(len(data)) + " vs " + str(len(got)) + ")")
+    h = ABopenfile(name, True)
+    got = h.readat(None, 0)
+    h.close()
+    if got != data:
+      flag("reopening with create=True changed valid data")
+  except Exception:
+    flag("normal operations raised an error for valid data")
+  cleanup(name)

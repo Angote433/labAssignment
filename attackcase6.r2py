@@ -1,0 +1,26 @@
+def cleanup(n):
+  for s in [".a", ".b"]:
+    if n + s in listfiles():
+      removefile(n + s)
+
+def flag(msg):
+  log("ATTACK SUCCEEDED: " + msg + "\n")
+
+# A write that begins with a space must not take effect.
+cleanup("ac6")
+try:
+  f = ABopenfile("ac6", True)
+  try:
+    f.writeat(" SabE", 0)
+  except Exception:
+    pass
+  f.writeat("S", 0)
+  f.close()
+  g = ABopenfile("ac6", False)
+  got = g.readat(None, 0)
+  g.close()
+  if got != "SE":
+    flag("a write beginning with a space was accepted, file now " + repr(got))
+except Exception:
+  flag("normal operations raised an error")
+cleanup("ac6")

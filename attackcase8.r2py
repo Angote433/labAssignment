@@ -1,0 +1,27 @@
+def cleanup(n):
+  for s in [".a", ".b"]:
+    if n + s in listfiles():
+      removefile(n + s)
+
+def flag(msg):
+  log("ATTACK SUCCEEDED: " + msg + "\n")
+
+# Opening an existing file with create=True must not recreate or reset it.
+cleanup("ac8")
+try:
+  f = ABopenfile("ac8", True)
+  f.writeat("SoneE", 0)
+  f.close()
+  g = ABopenfile("ac8", True)
+  got = g.readat(None, 0)
+  g.close()
+  if got != "SoneE":
+    flag("create=True on an existing file reset it to " + repr(got))
+  h = ABopenfile("ac8", False)
+  got = h.readat(None, 0)
+  h.close()
+  if got != "SoneE":
+    flag("file damaged after create=True reopen: " + repr(got))
+except Exception:
+  flag("normal operations raised an error")
+cleanup("ac8")

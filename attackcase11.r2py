@@ -1,0 +1,21 @@
+def cleanup(n):
+  for s in [".a", ".b"]:
+    if n + s in listfiles():
+      removefile(n + s)
+
+def flag(msg):
+  log("ATTACK SUCCEEDED: " + msg + "\n")
+
+# Opening a missing file with create=False must not create it.
+cleanup("ac11")
+try:
+  f = ABopenfile("ac11", False)
+  try:
+    f.close()
+  except Exception:
+    pass
+except Exception:
+  pass
+if "ac11.a" in listfiles() or "ac11.b" in listfiles():
+  flag("opening a missing file with create=False created files")
+cleanup("ac11")

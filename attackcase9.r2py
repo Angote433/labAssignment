@@ -1,0 +1,47 @@
+def cleanup(n):
+  for s in [".a", ".b"]:
+    if n + s in listfiles():
+      removefile(n + s)
+
+def flag(msg):
+  log("ATTACK SUCCEEDED: " + msg + "\n")
+
+# Threads writing while the file is closed must never leave an invalid file in A.
+# A large file makes validating and copying slow, which widens any race window.
+def start_writer(f, holder):
+  def run():
+    while not holder["stop"]:
+      try:
+        f.writeat("SaaaE", 0)
+        f.writeat("xaaax", 0)
+      except Exception:
+        pass
+  createthread(run)
+
+big = "S" + "x" * 1500000 + "E"
+broken = False
+got = ""
+for i in range(20):
+  cleanup("ac9")
+  try:
+    f = ABopenfile("ac9", True)
+    f.writeat(big, 0)
+    f.close()
+    f = ABopenfile("ac9", False)
+    holder = {"stop": False}
+    start_writer(f, holder)
+    sleep(0.003 + 0.002 * (i % 5))
+    f.close()
+    holder["stop"] = True
+    g = ABopenfile("ac9", False)
+    got = g.readat(None, 0)
+    g.close()
+  except Exception:
+    flag("normal operations raised an error under threading")
+    break
+  if got[0:1] != "S" or got[len(got) - 1:] != "E":
+    broken = True
+    break
+if broken:
+  flag("a thread race let invalid data into the valid file: " + repr(got[0:12]))
+cleanup("ac9")

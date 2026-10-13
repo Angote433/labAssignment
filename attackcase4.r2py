@@ -1,0 +1,33 @@
+def cleanup(n):
+  for s in [".a", ".b"]:
+    if n + s in listfiles():
+      removefile(n + s)
+
+def flag(msg):
+  log("ATTACK SUCCEEDED: " + msg + "\n")
+
+# An earlier valid version must survive a later invalid close, and a later valid one must replace it.
+cleanup("ac4")
+try:
+  f = ABopenfile("ac4", True)
+  f.writeat("SoneE", 0)
+  f.close()
+  f = ABopenfile("ac4", False)
+  f.writeat("xxxxx", 0)
+  f.close()
+  g = ABopenfile("ac4", False)
+  got = g.readat(None, 0)
+  g.close()
+  if got != "SoneE":
+    flag("an invalid close damaged the previously valid file: " + repr(got))
+  f = ABopenfile("ac4", False)
+  f.writeat("StwoE", 0)
+  f.close()
+  g = ABopenfile("ac4", False)
+  got = g.readat(None, 0)
+  g.close()
+  if got != "StwoE":
+    flag("a valid close did not replace the file: " + repr(got))
+except Exception:
+  flag("normal operations raised an error")
+cleanup("ac4")

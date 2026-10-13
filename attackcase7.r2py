@@ -1,0 +1,37 @@
+def cleanup(n):
+  for s in [".a", ".b"]:
+    if n + s in listfiles():
+      removefile(n + s)
+
+def flag(msg):
+  log("ATTACK SUCCEEDED: " + msg + "\n")
+
+# Using a closed file must change nothing, and the file must be reopenable.
+cleanup("ac7")
+try:
+  f = ABopenfile("ac7", True)
+  f.writeat("SoneE", 0)
+  f.close()
+except Exception:
+  flag("normal create/write/close raised an error")
+try:
+  f.readat(None, 0)
+except Exception:
+  pass
+try:
+  f.writeat("StwoE", 0)
+except Exception:
+  pass
+try:
+  f.close()
+except Exception:
+  pass
+try:
+  g = ABopenfile("ac7", False)
+  got = g.readat(None, 0)
+  g.close()
+  if got != "SoneE":
+    flag("operations on a closed file changed the data: " + repr(got))
+except Exception:
+  flag("file could not be reopened after close")
+cleanup("ac7")
