@@ -1,0 +1,21 @@
+def cleanup(n):
+  for s in [".a", ".b"]:
+    if n + s in listfiles():
+      removefile(n + s)
+
+def flag(msg):
+  log("ATTACK SUCCEEDED: " + msg + "\n")
+
+# New file reads SE; reads must come from A, never from the written-to file.
+cleanup("ac1")
+try:
+  f = ABopenfile("ac1", True)
+  if f.readat(2, 0) != "SE":
+    flag("new file does not read SE")
+  f.writeat("Stest12345E", 0)
+  if f.readat(None, 0) != "SE":
+    flag("read returned data written but not yet closed (read from B, or write went to A)")
+  f.close()
+except Exception:
+  flag("normal create/read/write/close raised an error")
+cleanup("ac1")
